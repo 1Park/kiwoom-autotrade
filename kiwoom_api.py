@@ -9,7 +9,7 @@ import requests
 
 DEFAULT_TIMEOUT = 15
 ACCOUNT_API_PATH = "/api/dostk/acnt"
-MARKET_API_PATH = "/api/dostk/mrkcond"
+STOCK_INFO_API_PATH = "/api/dostk/stkinfo"
 ORDER_API_PATH = "/api/dostk/ordr"
 DEFAULT_AUTOTRADE_FALLBACK = ("379800", "449180", "001500")
 
@@ -54,6 +54,13 @@ def parse_csv_codes(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def normalize_stock_code(stock_code: str) -> str:
+    code = stock_code.strip().upper()
+    if code.startswith("A") and len(code) == 7:
+        return code[1:]
+    return code
 
 
 def parse_bool(raw: str | None, *, default: bool = False) -> bool:
@@ -202,10 +209,10 @@ class KiwoomClient:
 
     def fetch_quote(self, token: str, stock_code: str) -> tuple[dict, dict]:
         return self._request(
-            MARKET_API_PATH,
+            STOCK_INFO_API_PATH,
             token=token,
-            api_id="ka10099",
-            payload={"stk_cd": stock_code},
+            api_id="ka10001",
+            payload={"stk_cd": normalize_stock_code(stock_code)},
         )
 
     def fetch_open_orders(
@@ -213,9 +220,10 @@ class KiwoomClient:
     ) -> tuple[dict, dict]:
         payload = {
             "acct_no": account_no,
-            "stk_cd": stock_code,
+            "stk_cd": normalize_stock_code(stock_code),
             "all_stk_tp": "0",
             "trde_tp": "0",
+            "stex_tp": "KRX",
         }
         return self._request(
             ACCOUNT_API_PATH, token=token, api_id="ka10075", payload=payload
@@ -233,7 +241,8 @@ class KiwoomClient:
     ) -> tuple[dict, dict]:
         payload = {
             "acct_no": account_no,
-            "stk_cd": stock_code,
+            "dmst_stex_tp": "KRX",
+            "stk_cd": normalize_stock_code(stock_code),
             "ord_qty": str(quantity),
             "ord_uv": str(price),
             "trde_tp": order_type,
@@ -254,7 +263,8 @@ class KiwoomClient:
     ) -> tuple[dict, dict]:
         payload = {
             "acct_no": account_no,
-            "stk_cd": stock_code,
+            "dmst_stex_tp": "KRX",
+            "stk_cd": normalize_stock_code(stock_code),
             "ord_qty": str(quantity),
             "ord_uv": str(price),
             "trde_tp": order_type,
@@ -274,7 +284,7 @@ class KiwoomClient:
         payload = {
             "acct_no": account_no,
             "ord_no": order_no,
-            "stk_cd": stock_code,
+            "stk_cd": normalize_stock_code(stock_code),
             "cncl_qty": str(quantity),
         }
         return self._request(
@@ -362,16 +372,20 @@ def extract_stock_codes(body: dict) -> list[str]:
         for key in ("stk_cd", "stock_code", "code"):
             value = item.get(key)
             if isinstance(value, str) and value.strip():
-                codes.append(value.strip())
+                codes.append(normalize_stock_code(value))
                 break
 
     if not codes:
         for key in ("stk_cd", "stock_code", "codes"):
             value = body.get(key)
             if isinstance(value, str) and value.strip():
-                codes.extend(parse_csv_codes(value))
+                codes.extend(normalize_stock_code(item) for item in parse_csv_codes(value))
             elif isinstance(value, list):
-                codes.extend(item.strip() for item in value if isinstance(item, str) and item.strip())
+                codes.extend(
+                    normalize_stock_code(item)
+                    for item in value
+                    if isinstance(item, str) and item.strip()
+                )
 
     seen = set()
     unique = []

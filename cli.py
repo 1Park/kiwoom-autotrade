@@ -9,6 +9,7 @@ from kiwoom_api import (
     KiwoomCredentials,
     RuntimeConfig,
     choose_account,
+    normalize_stock_code,
     normalize_accounts,
     normalize_holdings,
 )
@@ -30,7 +31,7 @@ def parse_number(value: str) -> int | float | str:
 
 def simplify_holding(row: dict) -> dict:
     return {
-        "stock_code": row.get("stk_cd"),
+        "stock_code": normalize_stock_code(str(row.get("stk_cd", ""))),
         "stock_name": row.get("stk_nm"),
         "quantity": parse_number(row.get("rmnd_qty", "0")),
         "avg_price": parse_number(row.get("avg_prc", "0")),
@@ -62,9 +63,10 @@ def resolve_account(config: RuntimeConfig, accounts_body: dict, explicit_account
 
 
 def guard_universe(universe: UniverseSnapshot, stock_code: str) -> None:
-    if stock_code not in universe.codes:
+    normalized_code = normalize_stock_code(stock_code)
+    if normalized_code not in universe.codes:
         raise KiwoomApiError(
-            f"Stock code {stock_code} is outside the allowed universe {universe.codes}."
+            f"Stock code {normalized_code} is outside the allowed universe {universe.codes}."
         )
 
 
@@ -119,8 +121,9 @@ def command_holdings(args: argparse.Namespace) -> int:
 def command_quote(args: argparse.Namespace) -> int:
     client, _ = build_client()
     token = client.issue_token()["token"]
-    _, body = client.fetch_quote(token, args.stock_code)
-    dump({"stock_code": args.stock_code, "quote": body})
+    normalized_code = normalize_stock_code(args.stock_code)
+    _, body = client.fetch_quote(token, normalized_code)
+    dump({"stock_code": normalized_code, "quote": body})
     return 0
 
 
@@ -144,17 +147,18 @@ def command_order(args: argparse.Namespace, *, side: str) -> int:
     universe = resolve_universe(client, token, config)
     request_payload = {
         "account_no": account_no,
-        "stock_code": args.stock_code,
+        "stock_code": normalize_stock_code(args.stock_code),
         "quantity": args.quantity,
         "price": args.price,
         "order_type": args.order_type,
     }
-    guard_universe(universe, args.stock_code)
+    normalized_code = normalize_stock_code(args.stock_code)
+    guard_universe(universe, normalized_code)
 
     if args.dry_run:
         storage.record_order(
             side=side,
-            stock_code=args.stock_code,
+            stock_code=normalized_code,
             quantity=args.quantity,
             price=args.price,
             order_type=args.order_type,
@@ -169,6 +173,7 @@ def command_order(args: argparse.Namespace, *, side: str) -> int:
                 "side": side,
                 "account_no": account_no,
                 "stock_code": args.stock_code,
+                "normalized_stock_code": normalized_code,
                 "quantity": args.quantity,
                 "price": args.price,
                 "order_type": args.order_type,
@@ -181,7 +186,7 @@ def command_order(args: argparse.Namespace, *, side: str) -> int:
         _, body = client.place_buy_order(
             token,
             account_no,
-            args.stock_code,
+            normalized_code,
             args.quantity,
             price=args.price,
             order_type=args.order_type,
@@ -190,7 +195,7 @@ def command_order(args: argparse.Namespace, *, side: str) -> int:
         _, body = client.place_sell_order(
             token,
             account_no,
-            args.stock_code,
+            normalized_code,
             args.quantity,
             price=args.price,
             order_type=args.order_type,
@@ -198,7 +203,7 @@ def command_order(args: argparse.Namespace, *, side: str) -> int:
 
     storage.record_order(
         side=side,
-        stock_code=args.stock_code,
+        stock_code=normalized_code,
         quantity=args.quantity,
         price=args.price,
         order_type=args.order_type,
@@ -213,6 +218,7 @@ def command_order(args: argparse.Namespace, *, side: str) -> int:
             "side": side,
             "account_no": account_no,
             "stock_code": args.stock_code,
+            "normalized_stock_code": normalized_code,
             "quantity": args.quantity,
             "price": args.price,
             "order_type": args.order_type,

@@ -8,6 +8,7 @@ from kiwoom_api import (
     KiwoomCredentials,
     RuntimeConfig,
     choose_account,
+    normalize_stock_code,
     normalize_accounts,
     normalize_holdings,
 )
@@ -39,6 +40,11 @@ def test_choose_account_uses_first_account_from_list() -> None:
 
 def test_normalize_accounts_deduplicates() -> None:
     assert normalize_accounts({"acctNo": ["1111111111", "1111111111"]}) == ["1111111111"]
+
+
+def test_normalize_stock_code_removes_leading_a() -> None:
+    assert normalize_stock_code("A379800") == "379800"
+    assert normalize_stock_code("379800") == "379800"
 
 
 def test_normalize_holdings_finds_output1_list() -> None:
@@ -93,11 +99,27 @@ def test_fetch_holdings_posts_api_id_and_payload() -> None:
     assert body["stk_acnt_evlt_prst"][0]["stk_cd"] == "005930"
 
 
+def test_fetch_open_orders_posts_expected_payload() -> None:
+    class FakeSession:
+        def post(self, url, headers, json, timeout):
+            assert url == "https://api.kiwoom.com/api/dostk/acnt"
+            assert headers["api-id"] == "ka10075"
+            assert json["acct_no"] == "1111111111"
+            assert json["stk_cd"] == "379800"
+            assert json["stex_tp"] == "KRX"
+            return FakeResponse(200, {"oso": []})
+
+    client = build_client(FakeSession())
+    _, body = client.fetch_open_orders("token", "1111111111", "A379800")
+    assert body["oso"] == []
+
+
 def test_place_buy_order_posts_expected_payload() -> None:
     class FakeSession:
         def post(self, url, headers, json, timeout):
             assert url == "https://api.kiwoom.com/api/dostk/ordr"
             assert headers["api-id"] == "kt10000"
+            assert json["dmst_stex_tp"] == "KRX"
             assert json["acct_no"] == "1111111111"
             assert json["stk_cd"] == "379800"
             assert json["ord_qty"] == "2"

@@ -17,12 +17,15 @@ class StubClient:
         return {}, {"stk_acnt_evlt_prst": [{"stk_cd": "379800", "stk_nm": "ETF", "rmnd_qty": "1"}]}
 
     def fetch_quote(self, token: str, stock_code: str):
+        assert stock_code == "379800"
         return {}, {"stk_cd": stock_code, "cur_prc": "10000"}
 
     def place_buy_order(self, token: str, account_no: str, stock_code: str, quantity: int, *, price: int = 0, order_type: str = "03"):
+        assert stock_code == "379800"
         return {}, {"ord_no": "123"}
 
     def place_sell_order(self, token: str, account_no: str, stock_code: str, quantity: int, *, price: int = 0, order_type: str = "03"):
+        assert stock_code == "379800"
         return {}, {"ord_no": "456"}
 
     def fetch_open_orders(self, token: str, account_no: str, stock_code: str = ""):
