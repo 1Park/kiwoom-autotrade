@@ -6,7 +6,9 @@ from kiwoom_api import (
     KiwoomApiError,
     KiwoomClient,
     KiwoomCredentials,
+    RuntimeConfig,
     choose_account,
+    normalize_accounts,
     normalize_holdings,
 )
 
@@ -35,6 +37,10 @@ def test_choose_account_uses_first_account_from_list() -> None:
     assert choose_account({"acctNo": ["1111111111", "3333333333"]}) == "1111111111"
 
 
+def test_normalize_accounts_deduplicates() -> None:
+    assert normalize_accounts({"acctNo": ["1111111111", "1111111111"]}) == ["1111111111"]
+
+
 def test_normalize_holdings_finds_output1_list() -> None:
     holdings = normalize_holdings({"output1": [{"stk_cd": "005930"}], "output2": {}})
     assert holdings == [{"stk_cd": "005930"}]
@@ -43,6 +49,14 @@ def test_normalize_holdings_finds_output1_list() -> None:
 def test_normalize_holdings_finds_kiwoom_balance_list() -> None:
     holdings = normalize_holdings({"stk_acnt_evlt_prst": [{"stk_cd": "379800"}]})
     assert holdings == [{"stk_cd": "379800"}]
+
+
+def test_runtime_config_uses_fallback_universe_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KIWOOM_STATIC_UNIVERSE", raising=False)
+    monkeypatch.delenv("KIWOOM_ACCOUNT_NO", raising=False)
+    config = RuntimeConfig.from_env()
+    assert config.static_universe == ["379800", "449180", "001500"]
+    assert config.target_account_id == ""
 
 
 def test_issue_token_posts_expected_payload() -> None:
@@ -77,6 +91,23 @@ def test_fetch_holdings_posts_api_id_and_payload() -> None:
     _, body = client.fetch_holdings("token", "1111111111")
 
     assert body["stk_acnt_evlt_prst"][0]["stk_cd"] == "005930"
+
+
+def test_place_buy_order_posts_expected_payload() -> None:
+    class FakeSession:
+        def post(self, url, headers, json, timeout):
+            assert url == "https://api.kiwoom.com/api/dostk/ordr"
+            assert headers["api-id"] == "kt10000"
+            assert json["acct_no"] == "1111111111"
+            assert json["stk_cd"] == "379800"
+            assert json["ord_qty"] == "2"
+            assert json["ord_uv"] == "0"
+            assert json["trde_tp"] == "03"
+            return FakeResponse(200, {"rt_cd": "0", "ord_no": "123"})
+
+    client = build_client(FakeSession())
+    _, body = client.place_buy_order("token", "1111111111", "379800", 2)
+    assert body["ord_no"] == "123"
 
 
 def test_raises_api_error_on_non_200() -> None:

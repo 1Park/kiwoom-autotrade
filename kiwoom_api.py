@@ -1,13 +1,17 @@
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import requests
 
 
 DEFAULT_TIMEOUT = 15
 ACCOUNT_API_PATH = "/api/dostk/acnt"
+MARKET_API_PATH = "/api/dostk/mrkcond"
+ORDER_API_PATH = "/api/dostk/ordr"
+DEFAULT_AUTOTRADE_FALLBACK = ("379800", "449180", "001500")
 
 
 def load_env_file(env_path: Path | None = None) -> None:
@@ -42,6 +46,22 @@ def require_env(name: str) -> str:
     return value
 
 
+def optional_env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def parse_csv_codes(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def parse_bool(raw: str | None, *, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 class KiwoomApiError(RuntimeError):
     pass
 
@@ -62,6 +82,38 @@ class KiwoomCredentials:
         )
 
 
+@dataclass
+class RuntimeConfig:
+    target_account_id: str = ""
+    static_universe: list[str] = field(
+        default_factory=lambda: list(DEFAULT_AUTOTRADE_FALLBACK)
+    )
+    autotrade_group_name: str = "autotrade"
+    autotrade_api_id: str = ""
+    autotrade_api_path: str = ""
+    autotrade_payload: dict[str, Any] = field(default_factory=dict)
+    allow_manual_fallback: bool = True
+
+    @classmethod
+    def from_env(cls) -> "RuntimeConfig":
+        load_env_file()
+        payload_raw = optional_env("KIWOOM_AUTOTRADE_PAYLOAD", "")
+        payload = json.loads(payload_raw) if payload_raw else {}
+        return cls(
+            target_account_id=optional_env("KIWOOM_ACCOUNT_NO", ""),
+            static_universe=parse_csv_codes(optional_env("KIWOOM_STATIC_UNIVERSE", ""))
+            or list(DEFAULT_AUTOTRADE_FALLBACK),
+            autotrade_group_name=optional_env("KIWOOM_AUTOTRADE_GROUP", "autotrade")
+            or "autotrade",
+            autotrade_api_id=optional_env("KIWOOM_AUTOTRADE_API_ID", ""),
+            autotrade_api_path=optional_env("KIWOOM_AUTOTRADE_API_PATH", ""),
+            autotrade_payload=payload if isinstance(payload, dict) else {},
+            allow_manual_fallback=parse_bool(
+                os.getenv("KIWOOM_ALLOW_STATIC_FALLBACK"), default=True
+            ),
+        )
+
+
 class KiwoomClient:
     def __init__(
         self,
@@ -73,25 +125,20 @@ class KiwoomClient:
         self.session = session or requests.Session()
         self.timeout = timeout
 
-    def _post(self, path: str, api_id: str | None = None, payload: dict | None = None) -> tuple[dict, dict]:
+    def _request(
+        self,
+        path: str,
+        *,
+        token: str | None = None,
+        api_id: str | None = None,
+        payload: dict | None = None,
+    ) -> tuple[dict, dict]:
         headers = {"Content-Type": "application/json;charset=UTF-8"}
+        if token:
+            headers["authorization"] = f"Bearer {token}"
         if api_id:
             headers["api-id"] = api_id
 
-        response = self.session.post(
-            f"{self.credentials.base_url}{path}",
-            headers=headers,
-            json=payload or {},
-            timeout=self.timeout,
-        )
-        return self._parse_response(response)
-
-    def _authed_post(self, path: str, token: str, api_id: str, payload: dict | None = None) -> tuple[dict, dict]:
-        headers = {
-            "Content-Type": "application/json;charset=UTF-8",
-            "authorization": f"Bearer {token}",
-            "api-id": api_id,
-        }
         response = self.session.post(
             f"{self.credentials.base_url}{path}",
             headers=headers,
@@ -110,10 +157,17 @@ class KiwoomClient:
         if response.status_code != 200:
             raise KiwoomApiError(f"HTTP {response.status_code}: {body}")
 
-        return dict(response.headers), body
+        if isinstance(body, dict):
+            rt_cd = body.get("rt_cd") or body.get("return_code")
+            msg = body.get("msg1") or body.get("msg") or body.get("return_msg")
+            if rt_cd not in (None, "0", 0):
+                raise KiwoomApiError(f"API {rt_cd}: {msg or body}")
+            return dict(response.headers), body
+
+        raise KiwoomApiError(f"Unexpected response body: {body}")
 
     def issue_token(self) -> dict:
-        _, body = self._post(
+        _, body = self._request(
             "/oauth2/token",
             payload={
                 "grant_type": "client_credentials",
@@ -127,7 +181,7 @@ class KiwoomClient:
         return body
 
     def fetch_accounts(self, token: str) -> tuple[dict, dict]:
-        return self._authed_post(ACCOUNT_API_PATH, token, "ka00001")
+        return self._request(ACCOUNT_API_PATH, token=token, api_id="ka00001")
 
     def fetch_holdings(
         self,
@@ -142,7 +196,104 @@ class KiwoomClient:
             "dmst_stex_tp": exchange_type,
             "qry_tp": query_type,
         }
-        return self._authed_post(ACCOUNT_API_PATH, token, "kt00004", payload)
+        return self._request(
+            ACCOUNT_API_PATH, token=token, api_id="kt00004", payload=payload
+        )
+
+    def fetch_quote(self, token: str, stock_code: str) -> tuple[dict, dict]:
+        return self._request(
+            MARKET_API_PATH,
+            token=token,
+            api_id="ka10099",
+            payload={"stk_cd": stock_code},
+        )
+
+    def fetch_open_orders(
+        self, token: str, account_no: str, stock_code: str = ""
+    ) -> tuple[dict, dict]:
+        payload = {
+            "acct_no": account_no,
+            "stk_cd": stock_code,
+            "all_stk_tp": "0",
+            "trde_tp": "0",
+        }
+        return self._request(
+            ACCOUNT_API_PATH, token=token, api_id="ka10075", payload=payload
+        )
+
+    def place_buy_order(
+        self,
+        token: str,
+        account_no: str,
+        stock_code: str,
+        quantity: int,
+        *,
+        price: int = 0,
+        order_type: str = "03",
+    ) -> tuple[dict, dict]:
+        payload = {
+            "acct_no": account_no,
+            "stk_cd": stock_code,
+            "ord_qty": str(quantity),
+            "ord_uv": str(price),
+            "trde_tp": order_type,
+        }
+        return self._request(
+            ORDER_API_PATH, token=token, api_id="kt10000", payload=payload
+        )
+
+    def place_sell_order(
+        self,
+        token: str,
+        account_no: str,
+        stock_code: str,
+        quantity: int,
+        *,
+        price: int = 0,
+        order_type: str = "03",
+    ) -> tuple[dict, dict]:
+        payload = {
+            "acct_no": account_no,
+            "stk_cd": stock_code,
+            "ord_qty": str(quantity),
+            "ord_uv": str(price),
+            "trde_tp": order_type,
+        }
+        return self._request(
+            ORDER_API_PATH, token=token, api_id="kt10001", payload=payload
+        )
+
+    def cancel_order(
+        self,
+        token: str,
+        account_no: str,
+        order_no: str,
+        stock_code: str,
+        quantity: int,
+    ) -> tuple[dict, dict]:
+        payload = {
+            "acct_no": account_no,
+            "ord_no": order_no,
+            "stk_cd": stock_code,
+            "cncl_qty": str(quantity),
+        }
+        return self._request(
+            ORDER_API_PATH, token=token, api_id="kt10003", payload=payload
+        )
+
+    def fetch_autotrade_group(
+        self,
+        token: str,
+        *,
+        api_id: str,
+        path: str,
+        group_name: str = "autotrade",
+        payload: dict | None = None,
+    ) -> tuple[dict, dict]:
+        request_payload = {"group_name": group_name}
+        if payload:
+            request_payload.update(payload)
+        return self._request(path, token=token, api_id=api_id, payload=request_payload)
 
 
 def choose_account(accounts_body: dict, explicit_account: str | None = None) -> str:
@@ -186,3 +337,46 @@ def normalize_holdings(body: dict) -> list[dict]:
             return value
 
     return []
+
+
+def normalize_accounts(body: dict) -> list[str]:
+    accounts = []
+    for key in ("acctNo", "acct_no", "account_no"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            accounts.append(value.strip())
+        elif isinstance(value, list):
+            accounts.extend(item.strip() for item in value if isinstance(item, str) and item.strip())
+    seen = set()
+    unique = []
+    for account in accounts:
+        if account not in seen:
+            seen.add(account)
+            unique.append(account)
+    return unique
+
+
+def extract_stock_codes(body: dict) -> list[str]:
+    codes: list[str] = []
+    for item in normalize_holdings(body):
+        for key in ("stk_cd", "stock_code", "code"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                codes.append(value.strip())
+                break
+
+    if not codes:
+        for key in ("stk_cd", "stock_code", "codes"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                codes.extend(parse_csv_codes(value))
+            elif isinstance(value, list):
+                codes.extend(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+    seen = set()
+    unique = []
+    for code in codes:
+        if code not in seen:
+            seen.add(code)
+            unique.append(code)
+    return unique
